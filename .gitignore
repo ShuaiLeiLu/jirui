@@ -19,11 +19,8 @@ __pycache__/
 .ruff_cache/
 
 # Environment
-.env
 .env.local
 .env.*.local
-web/.env
-server/.env
 
 # Build / runtime
 logs/
