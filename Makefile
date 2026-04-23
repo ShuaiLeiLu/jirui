@@ -24,7 +24,7 @@ install-web:
 
 install-server:
 	$(PYTHON) -m venv $(VENV)
-	$(ACTIVATE) && pip install --upgrade pip && pip install -e ./server[dev]
+	$(ACTIVATE) && pip install --upgrade pip && pip install -r ./server/requirements-dev.txt
 
 dev-web:
 	cd web && $(PNPM) dev

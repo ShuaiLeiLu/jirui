@@ -11,8 +11,7 @@
  *  - useHiredResearchers()  已雇佣研究员列表
  *  - useHotDocuments()      热门研究文档
  *  - usePublicRank()        公开排行榜
- *  - useTradingAccount()    模拟账户数据
- *  - useTradingPositions()  持仓列表
+ *  - useTradingAll()        模拟账户聚合快照
  */
 'use client';
 
@@ -45,11 +44,11 @@ import {
 
 import { useHiredResearchers, useHotDocuments, usePublicRank } from '@/features/researcher-workbench/hooks';
 import {
-  useTradingAccountWhenEnabled,
-  useTradingPositionsWhenEnabled,
+  useTradingAll,
   useTradingRealtimeStream,
 } from '@/features/trading/hooks';
 import { routes } from '@/lib/constants/routes';
+import { useUserSessionStore } from '@/stores/user-session.store';
 import type { HiredResearcher, HotDocument, PublicRankItem, RankSortBy } from '@/types/researcher-workbench';
 
 // ──────────── 常量与工具函数 ────────────
@@ -324,7 +323,7 @@ function RankRow({ item, sortBy }: { item: PublicRankItem; sortBy: RankSortBy })
 /** 模拟交易排名区 */
 function RankingSection() {
   const [sortBy, setSortBy] = useState<RankSortBy>('today');
-  const rankQuery = usePublicRank(sortBy);
+  const rankQuery = usePublicRank(sortBy, true);
   const rankings = rankQuery.data ?? [];
   const leftCol = rankings.filter((_, i) => i % 2 === 0);
   const rightCol = rankings.filter((_, i) => i % 2 === 1);
@@ -446,13 +445,11 @@ function LatestDocuments({
 function PortfolioSection({ researcher }: { researcher: HiredResearcher }) {
   const rid = researcher.researcher_id;
   const realtime = useTradingRealtimeStream(rid);
-  const enableRestSnapshot = realtime.status !== 'live';
-  const accountQuery = useTradingAccountWhenEnabled(rid, enableRestSnapshot);
-  const positionsQuery = useTradingPositionsWhenEnabled(rid, enableRestSnapshot);
+  const snapshotQuery = useTradingAll(rid);
 
-  const loading = accountQuery.isLoading || positionsQuery.isLoading;
-  const acct = accountQuery.data;
-  const positions = positionsQuery.data ?? [];
+  const loading = snapshotQuery.isLoading && !snapshotQuery.data;
+  const acct = snapshotQuery.data?.account;
+  const positions = snapshotQuery.data?.positions ?? [];
 
   /** 今日收益率 = 今日盈亏 / 总资产 */
   const totalPnlPct = acct && acct.total_asset > 0
@@ -549,12 +546,13 @@ function PortfolioSection({ researcher }: { researcher: HiredResearcher }) {
                     <th className="py-2 px-2 font-medium text-right">成本价</th>
                     <th className="py-2 px-2 font-medium text-right">现价</th>
                     <th className="py-2 px-2 font-medium text-right">盈亏</th>
+                    <th className="py-2 px-2 font-medium text-right">盈亏%</th>
                   </tr>
                 </thead>
                 <tbody>
                   {positions.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="py-6 text-center text-sm text-slate-400">
+                      <td colSpan={6} className="py-6 text-center text-sm text-slate-400">
                         暂无持仓 — 策略待执行或尚未开盘
                       </td>
                     </tr>
@@ -570,6 +568,13 @@ function PortfolioSection({ researcher }: { researcher: HiredResearcher }) {
                       <td className="py-2.5 px-2 text-right">
                         <div className={`font-semibold ${yieldColor(p.pnl)}`}>
                           {p.pnl > 0 ? '+' : ''}{p.pnl.toFixed(2)}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-2 text-right">
+                        <div className={`text-xs font-semibold ${yieldColor(p.pnl)}`}>
+                          {p.cost_price > 0
+                            ? `${((p.current_price - p.cost_price) / p.cost_price * 100).toFixed(2)}%`
+                            : '-'}
                         </div>
                       </td>
                     </tr>
@@ -728,8 +733,11 @@ function ResearcherDetailView({
 
 export default function AIResearcherWorkstationPage() {
   const [activeId, setActiveId] = useState<string | null>(null); // 选中的研究员 ID
-  const hiredQuery = useHiredResearchers();
-  const docsQuery = useHotDocuments();
+  const hydrated = useUserSessionStore((s) => s.hydrated);
+  const accessToken = useUserSessionStore((s) => s.accessToken);
+  const workbenchEnabled = hydrated && Boolean(accessToken);
+  const hiredQuery = useHiredResearchers(workbenchEnabled);
+  const docsQuery = useHotDocuments(workbenchEnabled);
 
   /** 首次加载时自动选中第一个研究员（对标截图默认选中） */
   useEffect(() => {

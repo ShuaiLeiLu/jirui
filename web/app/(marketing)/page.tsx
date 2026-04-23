@@ -59,14 +59,6 @@ const HeroSection: FC = () => (
             进入工作站 <ArrowRightOutlined />
           </Button>
         </Link>
-        <Link href={routes.login}>
-          <Button
-            size="large"
-            className="!bg-white !text-slate-800 !border-white hover:!bg-slate-100 hover:!text-slate-900 transition-all duration-300 transform hover:scale-105"
-          >
-            登录/注册
-          </Button>
-        </Link>
       </div>
     </div>
   </div>

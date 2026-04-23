@@ -102,6 +102,7 @@ export function WorkstationShell({ children }: PropsWithChildren) {
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   // 用户会话
+  const accessToken = useUserSessionStore((s) => s.accessToken);
   const user = useUserSessionStore((s) => s.user);
   const hydrated = useUserSessionStore((s) => s.hydrated);
   const hydrate = useUserSessionStore((s) => s.hydrate);
@@ -111,6 +112,13 @@ export function WorkstationShell({ children }: PropsWithChildren) {
   useEffect(() => {
     if (!hydrated) hydrate();
   }, [hydrated, hydrate]);
+
+  // 登录态恢复完成后，若仍无 token，直接回登录页。
+  useEffect(() => {
+    if (!hydrated) return;
+    if (accessToken) return;
+    router.replace(routes.login);
+  }, [hydrated, accessToken, router]);
 
   // 路由切换时自动关闭移动端抽屉
   useEffect(() => {
@@ -186,6 +194,29 @@ export function WorkstationShell({ children }: PropsWithChildren) {
       </div>
     </div>
   );
+
+  // 先等待 localStorage 中的 token 恢复，避免子页面在空鉴权状态下抢跑请求。
+  if (!hydrated) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <Space direction="vertical" size={8} align="center">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-200 border-t-brand-500" />
+          <span className="text-sm text-slate-400">正在恢复登录态...</span>
+        </Space>
+      </div>
+    );
+  }
+
+  if (!accessToken) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <Space direction="vertical" size={8} align="center">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-200 border-t-brand-500" />
+          <span className="text-sm text-slate-400">正在跳转登录页...</span>
+        </Space>
+      </div>
+    );
+  }
 
   return (
     <Layout className="min-h-screen">

@@ -20,6 +20,8 @@ from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from fastapi import HTTPException, status
+
 from app.integrations.akshare.client import (
     get_industry_boards,
     get_limit_down_pool,
@@ -154,7 +156,7 @@ class PreopenService:
         )
 
     def get_ai_digest(self) -> AiDigest:
-        """AI 热讯解读 —— 基于涨停池数据自动生成摘要（fallback，不调 LLM）。"""
+        """AI 热讯解读模板 —— 基于涨停池数据自动生成摘要。"""
         now = datetime.now(tz=UTC)
         calendar = _make_calendar()
         pool = get_limit_up_pool()
@@ -205,7 +207,7 @@ class PreopenService:
           1. 在线程池中收集 AKShare 真实市场数据
           2. 将数据拼装为 prompt 喂给 Gemini
           3. 解析 LLM 返回的结构化内容
-          4. LLM 不可用时自动降级到 get_ai_digest()
+          4. LLM 不可用或返回异常时，直接报错
         """
         # 缓存命中直接返回
         now_mono = time.monotonic()
@@ -214,8 +216,7 @@ class PreopenService:
 
         llm = get_llm_client()
         if not llm.is_configured:
-            logger.warning("LLM 未配置，盘前解读降级为模板拼接")
-            return await run_sync(self.get_ai_digest)
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="LLM 服务未配置")
 
         # 1. 收集数据
         preopen_data = await run_sync(self._collect_preopen_data_text)
@@ -250,15 +251,13 @@ class PreopenService:
                 _llm_digest_cache["data"] = digest
                 _llm_digest_cache["expires_at"] = time.monotonic() + _LLM_CACHE_TTL
                 return digest
-            logger.warning("LLM 盘前解读解析失败，降级为模板拼接")
+            logger.warning("LLM 盘前解读解析失败")
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LLM 响应解析失败")
         except Exception as e:
             logger.error("Gemini 盘前解读生成失败: %s", e)
-
-        # 4. 降级
-        result = await run_sync(self.get_ai_digest)
-        _llm_digest_cache["data"] = result
-        _llm_digest_cache["expires_at"] = time.monotonic() + _LLM_CACHE_TTL
-        return result
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LLM 服务调用失败") from e
 
     @staticmethod
     def _parse_ai_digest_response(reply: str) -> AiDigest | None:

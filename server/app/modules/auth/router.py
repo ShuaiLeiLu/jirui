@@ -1,15 +1,13 @@
 """
 认证路由
 
-支持双模式：
-  - 数据库可用时（session 注入成功）→ 走 async_* 方法
-  - 数据库不可用时 → fallback 到内存 mock 方法
+仅返回真实数据库数据。
 """
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_optional_session
@@ -29,11 +27,10 @@ async def login(
     payload: LoginRequest,
     session: AsyncSession | None = Depends(get_optional_session),
 ) -> ApiResponse[AuthToken]:
-    """登录接口 —— 优先走数据库，降级走内存 mock"""
-    if session:
-        data = await service.async_login(session, payload)
-    else:
-        data = service.login(payload)
+    """登录接口。"""
+    if not session:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="数据库不可用")
+    data = await service.async_login(session, payload)
     return ApiResponse(data=data)
 
 
@@ -42,11 +39,10 @@ async def register(
     payload: RegisterRequest,
     session: AsyncSession | None = Depends(get_optional_session),
 ) -> ApiResponse[UserProfile]:
-    """注册接口 —— 优先走数据库，降级走内存 mock"""
-    if session:
-        data = await service.async_register(session, payload)
-    else:
-        data = service.register(payload)
+    """注册接口。"""
+    if not session:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="数据库不可用")
+    data = await service.async_register(session, payload)
     return ApiResponse(data=data)
 
 
@@ -55,9 +51,8 @@ async def me(
     user_id: str = Depends(get_current_user_id),
     session: AsyncSession | None = Depends(get_optional_session),
 ) -> ApiResponse[UserProfile]:
-    """获取当前用户 Profile —— 优先走数据库，降级走内存 mock"""
-    if session:
-        data = await service.async_get_profile(session, user_id)
-    else:
-        data = service.get_profile(user_id=user_id)
+    """获取当前用户 Profile。"""
+    if not session:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="数据库不可用")
+    data = await service.async_get_profile(session, user_id)
     return ApiResponse(data=data)

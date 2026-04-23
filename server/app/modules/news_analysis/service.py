@@ -19,6 +19,8 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from fastapi import HTTPException, status
+
 from app.integrations.akshare.client import (
     get_limit_up_pool,
     get_live_news_merged,
@@ -166,7 +168,7 @@ class NewsAnalysisService:
         )
 
     def list_ai_panels(self) -> list[NewsAiPanel]:
-        """AI 智能分析面板 —— 基于涨停池真实数据聚合（fallback，不调 LLM）。"""
+        """AI 智能分析模板 —— 基于涨停池真实数据聚合。"""
         now = datetime.now(tz=UTC)
         pool = get_limit_up_pool()
         strong = get_strong_pool()
@@ -230,7 +232,7 @@ class NewsAnalysisService:
           1. 在线程池中收集 AKShare 真实市场数据
           2. 将数据拼装为 prompt 喂给 Gemini
           3. 解析 LLM 返回的结构化内容，生成 4 张 AI 面板
-          4. LLM 不可用时自动降级到 list_ai_panels()
+          4. LLM 不可用或返回异常时，直接报错
         """
         now_mono = time.monotonic()
         if _llm_panels_cache["data"] is not None and now_mono < _llm_panels_cache["expires_at"]:
@@ -238,8 +240,7 @@ class NewsAnalysisService:
 
         llm = get_llm_client()
         if not llm.is_configured:
-            logger.warning("LLM 未配置，AI 面板降级为模板拼接")
-            return await run_sync(self.list_ai_panels)
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="LLM 服务未配置")
 
         # 1. 在线程池中收集数据（AKShare 同步调用）
         market_data = await run_sync(self._collect_market_data_text)
@@ -275,15 +276,13 @@ class NewsAnalysisService:
                 _llm_panels_cache["data"] = panels
                 _llm_panels_cache["expires_at"] = time.monotonic() + _LLM_CACHE_TTL
                 return panels
-            logger.warning("LLM 返回内容解析失败，降级为模板拼接")
+            logger.warning("LLM 返回内容解析失败")
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LLM 响应解析失败")
         except Exception as e:
             logger.error("Gemini AI 面板生成失败: %s", e)
-
-        # 4. 降级
-        result = await run_sync(self.list_ai_panels)
-        _llm_panels_cache["data"] = result
-        _llm_panels_cache["expires_at"] = time.monotonic() + _LLM_CACHE_TTL
-        return result
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LLM 服务调用失败") from e
 
     @staticmethod
     def _parse_ai_panels_response(reply: str) -> list[NewsAiPanel] | None:

@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from functools import partial
@@ -38,6 +40,15 @@ logger = logging.getLogger(__name__)
 # 用于 run_in_executor 的线程池（AKShare 是同步阻塞调用）
 _executor = ThreadPoolExecutor(max_workers=12, thread_name_prefix="akshare")
 T = TypeVar("T")
+_akshare_proxy_guard = Lock()
+_AKSHARE_PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
 
 
 # ════════════════════════════════════════════════════════════
@@ -52,6 +63,30 @@ async def run_sync(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     loop = asyncio.get_running_loop()
     func = partial(fn, *args, **kwargs)
     return await loop.run_in_executor(_executor, func)
+
+
+@contextmanager
+def _without_proxy_env() -> Any:
+    """Temporarily remove process-level proxy env vars for AKShare HTTP calls."""
+    previous = {key: os.environ.pop(key, None) for key in _AKSHARE_PROXY_ENV_KEYS}
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def call_akshare_api(api_name: str, /, *args: Any, **kwargs: Any) -> Any:
+    """Call an AKShare API while bypassing broken shell proxy settings."""
+    import akshare as ak
+
+    api = getattr(ak, api_name)
+    with _akshare_proxy_guard:
+        with _without_proxy_env():
+            return api(*args, **kwargs)
 
 
 # ════════════════════════════════════════════════════════════
@@ -98,6 +133,8 @@ class TTLCache:
 # 全局缓存实例
 _cache = TTLCache()
 _stock_quotes_lock = Lock()
+_stock_quote_locks_guard = Lock()
+_stock_quote_locks: dict[str, Lock] = {}
 
 # 缓存 TTL 配置（秒）
 CACHE_TTL_REALTIME = 15       # 实时行情：15 秒
@@ -263,6 +300,82 @@ def _strip_exchange_prefix(code: str) -> str:
     return code
 
 
+def _stock_quote_cache_key(symbol: str) -> str:
+    return f"stock_quote:{symbol}"
+
+
+def _get_stock_quote_lock(symbol: str) -> Lock:
+    with _stock_quote_locks_guard:
+        lock = _stock_quote_locks.get(symbol)
+        if lock is None:
+            lock = Lock()
+            _stock_quote_locks[symbol] = lock
+        return lock
+
+
+def _find_quote_in_all_cache(symbol: str) -> StockQuote | None:
+    cached = _cache.get("stock_quotes_all")
+    if not isinstance(cached, list):
+        return None
+    for quote in cached:
+        if isinstance(quote, StockQuote) and quote.symbol == symbol:
+            return quote
+    return None
+
+
+def _peek_stock_quote(symbol: str) -> StockQuote | None:
+    cached = _cache.get(_stock_quote_cache_key(symbol))
+    if isinstance(cached, StockQuote):
+        return cached
+    return _find_quote_in_all_cache(symbol)
+
+
+def _fetch_stock_quote(symbol: str) -> StockQuote | None:
+    cached = _peek_stock_quote(symbol)
+    if cached is not None:
+        return cached
+
+    quote_lock = _get_stock_quote_lock(symbol)
+    with quote_lock:
+        cached = _peek_stock_quote(symbol)
+        if cached is not None:
+            return cached
+
+        try:
+            df = call_akshare_api("stock_bid_ask_em", symbol=symbol)
+        except Exception:
+            logger.exception("获取个股实时行情失败：%s", symbol)
+            return None
+
+        if df.empty:
+            return None
+
+        item_map = {
+            _safe_str(row.get("item")): row.get("value")
+            for _, row in df.iterrows()
+        }
+        price = _safe_float(item_map.get("最新"))
+        if price <= 0:
+            return None
+
+        quote = StockQuote(
+            symbol=symbol,
+            name=symbol,
+            price=price,
+            change=_safe_float(item_map.get("涨跌")),
+            change_pct=_safe_float(item_map.get("涨幅")),
+            open=_safe_float(item_map.get("今开")),
+            high=_safe_float(item_map.get("最高")),
+            low=_safe_float(item_map.get("最低")),
+            prev_close=_safe_float(item_map.get("昨收")),
+            volume=_safe_float(item_map.get("总手")),
+            amount=_safe_float(item_map.get("金额")),
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        _cache.set(_stock_quote_cache_key(symbol), quote, CACHE_TTL_REALTIME)
+        return quote
+
+
 def get_stock_quotes() -> list[StockQuote]:
     """获取 A 股全市场实时行情（新浪数据源）。
 
@@ -282,8 +395,7 @@ def get_stock_quotes() -> list[StockQuote]:
             return cached
 
         try:
-            import akshare as ak
-            df = ak.stock_zh_a_spot()
+            df = call_akshare_api("stock_zh_a_spot")
         except Exception:
             logger.exception("获取 A 股实时行情失败")
             return []
@@ -314,19 +426,29 @@ def get_stock_quotes() -> list[StockQuote]:
 
 
 def get_stock_quote_by_symbols(symbols: list[str]) -> dict[str, StockQuote]:
-    """按股票代码批量获取行情，返回 {代码: 行情} 字典。"""
-    all_quotes = get_stock_quotes()
-    symbol_set = set(symbols)
-    return {q.symbol: q for q in all_quotes if q.symbol in symbol_set}
+    """按股票代码批量获取行情，返回 {代码: 行情} 字典。
+
+    交易模块只需要当前持仓的少量股票，不应该为此触发全市场行情拉取。
+    这里改为按 symbol 拉取，并对每只股票做 15 秒缓存。
+    """
+    normalized_symbols = sorted({symbol for symbol in symbols if symbol})
+    quotes: dict[str, StockQuote] = {}
+    for symbol in normalized_symbols:
+        quote = _fetch_stock_quote(symbol)
+        if quote is not None:
+            quotes[symbol] = quote
+    return quotes
 
 
 def peek_stock_quote_by_symbols(symbols: list[str]) -> dict[str, StockQuote]:
     """只从本地缓存读取个股行情，不触发外部行情拉取。"""
-    cached = _cache.get("stock_quotes_all")
-    if cached is None:
-        return {}
-    symbol_set = set(symbols)
-    return {q.symbol: q for q in cached if q.symbol in symbol_set}
+    normalized_symbols = sorted({symbol for symbol in symbols if symbol})
+    quotes: dict[str, StockQuote] = {}
+    for symbol in normalized_symbols:
+        quote = _peek_stock_quote(symbol)
+        if quote is not None:
+            quotes[symbol] = quote
+    return quotes
 
 
 def get_index_quotes() -> list[IndexQuote]:
@@ -340,8 +462,7 @@ def get_index_quotes() -> list[IndexQuote]:
         return cached
 
     try:
-        import akshare as ak
-        df = ak.stock_zh_index_spot_sina()
+        df = call_akshare_api("stock_zh_index_spot_sina")
     except Exception:
         logger.exception("获取指数实时行情失败")
         return []
@@ -386,8 +507,7 @@ def get_news_main() -> list[NewsItem]:
         return cached
 
     try:
-        import akshare as ak
-        df = ak.stock_news_main_cx()
+        df = call_akshare_api("stock_news_main_cx")
     except Exception:
         logger.exception("获取财经新闻失败")
         return []
@@ -417,8 +537,7 @@ def get_stock_news(symbol: str, limit: int = 20) -> list[StockNewsItem]:
         return cached[:limit]
 
     try:
-        import akshare as ak
-        df = ak.stock_news_em(symbol=symbol)
+        df = call_akshare_api("stock_news_em", symbol=symbol)
     except Exception:
         logger.exception("获取个股新闻失败：%s", symbol)
         return []
@@ -452,8 +571,7 @@ def get_live_news_ths() -> list[LiveNewsItem]:
         return cached
 
     try:
-        import akshare as ak
-        df = ak.stock_info_global_ths()
+        df = call_akshare_api("stock_info_global_ths")
     except Exception:
         logger.exception("获取同花顺 7x24 快讯失败")
         return []
@@ -485,8 +603,7 @@ def get_live_news_cls() -> list[LiveNewsItem]:
         return cached
 
     try:
-        import akshare as ak
-        df = ak.stock_info_global_cls()
+        df = call_akshare_api("stock_info_global_cls")
     except Exception:
         logger.exception("获取财联社快讯失败")
         return []
@@ -545,8 +662,7 @@ def get_industry_boards() -> list[IndustryBoard]:
         return cached
 
     try:
-        import akshare as ak
-        df = ak.stock_board_industry_summary_ths()
+        df = call_akshare_api("stock_board_industry_summary_ths")
     except Exception:
         logger.exception("获取行业板块涨跌失败")
         return []
@@ -582,8 +698,7 @@ def get_limit_up_pool(trade_date: date | None = None) -> list[LimitUpStock]:
         return cached
 
     try:
-        import akshare as ak
-        df = ak.stock_zt_pool_em(date=dt_str)
+        df = call_akshare_api("stock_zt_pool_em", date=dt_str)
     except Exception:
         logger.exception("获取涨停池失败：%s", dt_str)
         return []
@@ -619,8 +734,7 @@ def get_limit_down_pool(trade_date: date | None = None) -> list[LimitDownStock]:
         return cached
 
     try:
-        import akshare as ak
-        df = ak.stock_zt_pool_dtgc_em(date=dt_str)
+        df = call_akshare_api("stock_zt_pool_dtgc_em", date=dt_str)
     except Exception:
         logger.exception("获取跌停池失败：%s", dt_str)
         return []
@@ -649,8 +763,7 @@ def get_strong_pool(trade_date: date | None = None) -> list[StrongStock]:
         return cached
 
     try:
-        import akshare as ak
-        df = ak.stock_zt_pool_strong_em(date=dt_str)
+        df = call_akshare_api("stock_zt_pool_strong_em", date=dt_str)
     except Exception:
         logger.exception("获取强势股池失败：%s", dt_str)
         return []

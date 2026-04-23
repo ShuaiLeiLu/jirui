@@ -38,26 +38,19 @@ def decode_access_token(token: str) -> dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效或过期的访问令牌") from exc
 
 
+def extract_user_id_from_token(token: str) -> str:
+    """Extract the authenticated user id from an access token."""
+    claims = decode_access_token(token)
+    sub = claims.get("sub")
+    if not sub:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="访问令牌缺少用户标识")
+    return str(sub)
+
+
 def get_current_user_id(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> str:
-    """FastAPI dependency — extracts `user_id` from the Bearer token.
-
-    When no token is provided (e.g. during early dev / Swagger testing),
-    falls back to the demo user so that the API remains functional without
-    a login flow.  This fallback will be removed once the login flow is
-    wired end-to-end.
-    """
+    """FastAPI dependency — extracts `user_id` from the Bearer token."""
     if credentials is None:
-        # 开发阶段：无 token 时 fallback 到种子演示用户，确保能看到 DB 真实数据
-        return "u_demo"
-    try:
-        claims = decode_access_token(credentials.credentials)
-        sub = claims.get("sub")
-        if not sub:
-            # token 合法但缺少 sub 字段，开发阶段 fallback
-            return "u_demo"
-        return str(sub)
-    except HTTPException:
-        # token 无效或过期，开发阶段 fallback 到演示用户
-        return "u_demo"
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少访问令牌")
+    return extract_user_id_from_token(credentials.credentials)

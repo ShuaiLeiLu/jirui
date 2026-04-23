@@ -42,7 +42,7 @@ async def hot_news() -> ApiResponse[ListResponse[HotNewsItem]]:
 
 @router.get("/ai-digest")
 async def ai_digest() -> ApiResponse[AiDigest]:
-    """盘前 AI 解读 —— 调用 Gemini 生成专业分析，失败时自动降级"""
+    """盘前 AI 解读 —— 仅返回真实 LLM 分析结果。"""
     data = await service.generate_ai_digest_with_llm()
     return ApiResponse(data=data)
 

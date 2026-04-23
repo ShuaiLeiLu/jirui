@@ -39,7 +39,7 @@ def _is_trading_hours() -> bool:
 
 async def _run_daily_rotation(db: DatabaseFactory) -> None:
     """执行每日轮动调仓（仅在交易时段内执行）"""
-    from app.engine.strategy_engine import execute_daily_rotation
+    from app.engine.strategy_engine import execute_daily_rotation  # noqa: E501
 
     if not _is_trading_hours():
         logger.info("[调度器] 当前非交易时段，跳过调仓")
@@ -52,6 +52,23 @@ async def _run_daily_rotation(db: DatabaseFactory) -> None:
         logger.info("[调度器] 调仓完成: %s", result)
     except Exception:
         logger.exception("[调度器] 调仓执行异常")
+
+
+async def _run_limit_up_check(db: DatabaseFactory) -> None:
+    """14:00 检查昨日涨停持仓是否打开（仅在交易时段内执行）"""
+    from app.engine.strategy_engine import check_limit_up
+
+    if not _is_trading_hours():
+        logger.info("[调度器] 当前非交易时段，跳过涨停检查")
+        return
+
+    logger.info("[调度器] 开始执行涨停打开检查...")
+    try:
+        async with db.session_factory() as session:
+            result = await check_limit_up(session)
+        logger.info("[调度器] 涨停检查完成: %s", result)
+    except Exception:
+        logger.exception("[调度器] 涨停检查执行异常")
 
 
 async def _reset_daily_pnl(db: DatabaseFactory) -> None:
@@ -95,6 +112,16 @@ def start_scheduler(db: DatabaseFactory) -> AsyncIOScheduler:
         args=[db],
         id="daily_rotation",
         name="每日轮动调仓",
+        replace_existing=True,
+    )
+
+    # 每个交易日 14:00 检查昨日涨停持仓是否打开
+    _scheduler.add_job(
+        _run_limit_up_check,
+        trigger=CronTrigger(hour=14, minute=0, day_of_week="mon-fri"),
+        args=[db],
+        id="check_limit_up",
+        name="涨停打开检查",
         replace_existing=True,
     )
 

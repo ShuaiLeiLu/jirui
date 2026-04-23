@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-import time
 from uuid import uuid4
 
 from fastapi import HTTPException, status
@@ -27,10 +27,18 @@ from app.integrations.akshare.client import (
     peek_stock_quote_by_symbols,
     run_sync,
 )
+from app.models.researcher import Researcher as ResearcherModel
 from app.models.trading import Position as PositionModel
 from app.models.trading import TradeLog as TradeLogModel
 from app.models.trading import TradeRecord as RecordModel
 from app.models.trading import TradingAccount as AccountModel
+from app.modules.trading.reflection_skill import TradingReflectionSkill
+from app.modules.trading.rqalpha_adapter import (
+    ORDER_STATUS_FILLED,
+    MarketSnapshot,
+    compute_sellable_quantity,
+    execute_stock_order,
+)
 from app.modules.trading.schemas import (
     DEFAULT_INITIAL_CAPITAL,
     DailyReturn,
@@ -43,8 +51,9 @@ from app.modules.trading.schemas import (
     TradeLogItem,
     TradeRecord,
     TradingAccount,
-    TradingStreamSnapshot,
+    TradingAllData,
     TradingStats,
+    TradingStreamSnapshot,
 )
 from app.repositories.trading_repo import PositionRepository, TradingAccountRepository
 
@@ -65,6 +74,7 @@ class _TimedCacheEntry:
 
 
 _view_cache: dict[str, _TimedCacheEntry] = {}
+_reflection_skill = TradingReflectionSkill()
 
 
 @dataclass
@@ -118,22 +128,6 @@ class TradingService:
             holding_value=0.0,
             daily_pnl=0.0,
         )
-
-    @staticmethod
-    def _trade_fee(side: str, amount: float) -> float:
-        """计算交易费用。
-
-        规则与策略引擎保持一致：
-        - 买入：佣金万三，最低 5 元
-        - 卖出：佣金万三 + 印花税千一，最低佣金 5 元
-        """
-        if amount <= 0:
-            return 0.0
-        if side == "buy":
-            return round(max(amount * OPEN_COMMISSION_RATE, MIN_COMMISSION), 2)
-        commission = max(amount * CLOSE_COMMISSION_RATE, MIN_COMMISSION)
-        tax = amount * CLOSE_TAX_RATE
-        return round(commission + tax, 2)
 
     @staticmethod
     def _sort_positions(items: list[PositionItem]) -> list[PositionItem]:
@@ -218,8 +212,8 @@ class TradingService:
     ) -> dict[str, StockQuote]:
         """批量获取实时行情。
 
-        - `cache_only=True`：只读本地缓存，不触发慢速的全市场行情拉取
-        - `cache_only=False`：必要时触发外部行情拉取，适合 SSE 等实时流
+        - `cache_only=True`：只读本地缓存，不触发外部行情请求
+        - `cache_only=False`：按 symbol 补齐缺失行情，适合 SSE 等实时流
         """
         normalized_symbols = sorted({symbol for symbol in symbols if symbol})
         if not normalized_symbols:
@@ -263,6 +257,60 @@ class TradingService:
         )
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    async def _load_today_buy_quantities(
+        self,
+        session: AsyncSession,
+        account_id: str,
+    ) -> dict[str, int]:
+        today = datetime.now().date()
+        start_at = datetime.combine(today, datetime.min.time())
+        end_at = start_at + timedelta(days=1)
+        rows = await self._load_account_records_in_range(
+            session,
+            account_id,
+            start_at=start_at,
+            end_at=end_at,
+        )
+        quantities: dict[str, int] = defaultdict(int)
+        for row in rows:
+            if row.side == "buy":
+                quantities[row.symbol] += int(row.quantity)
+        return dict(quantities)
+
+    async def _load_researcher_model(
+        self,
+        session: AsyncSession,
+        researcher_id: str,
+    ) -> ResearcherModel | None:
+        stmt = select(ResearcherModel).where(ResearcherModel.id == researcher_id)
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def _append_trade_reflection_log(
+        self,
+        session: AsyncSession,
+        *,
+        account_id: str,
+        researcher: ResearcherModel | None,
+        trade_context: dict[str, object],
+    ) -> None:
+        """追加成交后的 AI 复盘日志，内容会覆盖交易复盘、执行反思与次日展望。"""
+        reflection = await _reflection_skill.build_trade_reflection(
+            researcher_name=researcher.name if researcher else "小市值研究员",
+            researcher_prompt=researcher.prompt if researcher else "",
+            trade_context=trade_context,
+        )
+        session.add(
+            TradeLogModel(
+                id=f"tl_{uuid4().hex[:8]}",
+                account_id=account_id,
+                log_type="analysis",
+                trade_record_ids="[]",
+                title=_reflection_skill.build_trade_log_title(trade_context),
+                content=reflection,
+            )
+        )
 
     def _replay_records(
         self,
@@ -325,8 +373,8 @@ class TradingService:
 
                 if remaining > 0:
                     # 容错：若出现超卖数据，避免把收益算成异常高值。
-                    fallback_cost = price * remaining
-                    cost_basis += fallback_cost
+                    estimated_cost = price * remaining
+                    cost_basis += estimated_cost
                     consumed += remaining
 
                 if symbol_lots:
@@ -365,6 +413,7 @@ class TradingService:
                 realized_pnl=realized_pnl,
                 realized_pnl_pct=realized_pnl_pct,
                 hold_days=hold_days_val,
+                position_ratio=round(amount / initial_capital, 4) if initial_capital > 0 else None,
                 created_at=dt,
             )
 
@@ -492,6 +541,7 @@ class TradingService:
 
         repo = PositionRepository(session)
         positions = await repo.list_by_account(account_id)
+        today_buy_quantities = await self._load_today_buy_quantities(session, account_id)
         quote_map = await self._load_realtime_quotes(
             [position.symbol for position in positions],
             cache_only=cache_only,
@@ -502,6 +552,10 @@ class TradingService:
                 symbol=position.symbol,
                 name=position.name,
                 quantity=position.quantity,
+                sellable_quantity=compute_sellable_quantity(
+                    int(position.quantity),
+                    today_buy_quantities.get(position.symbol, 0),
+                ),
                 cost_price=float(position.cost_price),
                 current_price=float(position.current_price),
                 pnl=float(position.pnl),
@@ -513,17 +567,32 @@ class TradingService:
             self._cache_set(f"positions:{account_id}", sorted_items, POSITIONS_CACHE_TTL_SECONDS)
         return sorted_items
 
-    async def async_list_records(
-        self, session: AsyncSession, account_id: str, *, limit: int = 20
-    ) -> list[TradeRecord]:
-        """从数据库查询成交记录，并补齐成本/已实现盈亏等增强字段。"""
+    async def _load_replay(
+        self, session: AsyncSession, account_id: str,
+    ) -> tuple[list[RecordModel], _ReplaySnapshot]:
+        """加载成交记录并回放（可复用，避免多个方法各自重复加载）。"""
+        cache_key = f"replay:{account_id}"
+        cached = self._cache_get(cache_key)
+        if isinstance(cached, tuple) and len(cached) == 2:
+            return cached  # type: ignore[return-value]
+
         records = await self._load_account_records(session, account_id)
         replay = self._replay_records(records)
+        self._cache_set(cache_key, (records, replay), ACCOUNT_CACHE_TTL_SECONDS)
+        return records, replay
+
+    async def async_list_records(
+        self, session: AsyncSession, account_id: str, *, limit: int = 20,
+        _replay: tuple[list[RecordModel], _ReplaySnapshot] | None = None,
+    ) -> list[TradeRecord]:
+        """从数据库查询成交记录，并补齐成本/已实现盈亏等增强字段。"""
+        records, replay = _replay or await self._load_replay(session, account_id)
         desc_items = [replay.record_map[row.id] for row in reversed(records)]
         return desc_items[:limit]
 
     async def async_list_logs(
-        self, session: AsyncSession, account_id: str, *, limit: int = 100
+        self, session: AsyncSession, account_id: str, *, limit: int = 100,
+        _replay: tuple[list[RecordModel], _ReplaySnapshot] | None = None,
     ) -> list[TradeLogItem]:
         """从数据库查询交易日志（trade + analysis 条目），并填充增强后的成交记录。"""
         stmt = (
@@ -535,8 +604,7 @@ class TradingService:
         result = await session.execute(stmt)
         logs = list(result.scalars().all())
 
-        records = await self._load_account_records(session, account_id)
-        replay = self._replay_records(records)
+        _, replay = _replay or await self._load_replay(session, account_id)
 
         items: list[TradeLogItem] = []
         for log in logs:
@@ -556,6 +624,95 @@ class TradingService:
                 )
             )
         return items
+
+    async def async_get_all(
+        self,
+        session: AsyncSession,
+        user_id: str,
+        researcher_id: str,
+    ) -> TradingAllData:
+        """一次请求返回模拟盘全部页面数据。
+
+        核心优化：只加载一次成交记录、只回放一次，然后复用到
+        account / positions / records / logs 各视图。
+        """
+        acc = await self._resolve_account_model(session, user_id, researcher_id)
+        account_id = acc.id
+
+        # 1. 持仓列表 + 实时行情更新（聚合端点是唯一请求，允许触发行情拉取）
+        repo = PositionRepository(session)
+        positions = await repo.list_by_account(account_id)
+        today_buy_quantities = await self._load_today_buy_quantities(session, account_id)
+        quote_map = await self._load_realtime_quotes(
+            [p.symbol for p in positions], cache_only=False,
+        )
+        _, floating_daily_pnl = self._apply_quotes_to_positions(positions, quote_map)
+
+        position_items = self._sort_positions([
+            PositionItem(
+                symbol=p.symbol, name=p.name, quantity=p.quantity,
+                sellable_quantity=compute_sellable_quantity(
+                    int(p.quantity),
+                    today_buy_quantities.get(p.symbol, 0),
+                ),
+                cost_price=float(p.cost_price),
+                current_price=float(p.current_price),
+                pnl=float(p.pnl),
+            )
+            for p in positions
+        ])
+
+        # 2. 加载 & 回放成交记录（只做一次）
+        replay_data = await self._load_replay(session, account_id)
+        raw_records, replay = replay_data
+
+        # 3. 计算 daily_pnl（复用已有 replay，不再独立查+回放）
+        today = datetime.now().date()
+        realized_daily_pnl = 0.0
+        has_sells_today = any(
+            r.side == "sell" and r.created_at.date() == today for r in raw_records
+        )
+        if has_sells_today:
+            for record in replay.record_map.values():
+                if record.created_at.date() != today:
+                    continue
+                if record.side == "buy":
+                    realized_daily_pnl -= record.commission
+                elif record.realized_pnl is not None:
+                    realized_daily_pnl += record.realized_pnl
+        else:
+            today_buys = [r for r in raw_records if r.created_at.date() == today]
+            realized_daily_pnl = -sum(float(r.commission or 0.0) for r in today_buys)
+
+        holding_value = sum(float(p.current_price) * p.quantity for p in positions)
+        total_asset = round(float(acc.available_cash) + holding_value, 2)
+        daily_pnl = round(realized_daily_pnl + floating_daily_pnl, 2)
+
+        account_data = TradingAccount(
+            account_id=acc.id,
+            initial_capital=self._infer_initial_capital(acc),
+            total_asset=total_asset,
+            available_cash=float(acc.available_cash),
+            holding_value=round(holding_value, 2),
+            daily_pnl=daily_pnl,
+        )
+
+        # 4. 成交记录（复用 replay）
+        record_items = await self.async_list_records(
+            session, account_id, limit=20, _replay=replay_data,
+        )
+
+        # 5. 交易日志（复用 replay）
+        log_items = await self.async_list_logs(
+            session, account_id, limit=200, _replay=replay_data,
+        )
+
+        return TradingAllData(
+            account=account_data,
+            positions=position_items,
+            records=record_items,
+            logs=log_items,
+        )
 
     async def async_get_stats(
         self, session: AsyncSession, account_id: str, initial_capital: float | None = None
@@ -716,6 +873,7 @@ class TradingService:
         """
         acct_repo = TradingAccountRepository(session)
         pos_repo = PositionRepository(session)
+        researcher = await self._load_researcher_model(session, payload.researcher_id)
 
         acc = await acct_repo.get_by_user_researcher(user_id, payload.researcher_id)
         if not acc:
@@ -723,77 +881,99 @@ class TradingService:
         if not acc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模拟账户不存在")
 
-        amount = round(payload.price * payload.quantity, 2)
-        commission = self._trade_fee(payload.side, amount)
+        existing = await pos_repo.get_by_account_symbol(acc.id, payload.symbol)
+        cost_price_before = float(existing.cost_price) if existing else None
+        today_buy_quantities = await self._load_today_buy_quantities(session, acc.id)
+
+        quote_map = await self._load_realtime_quotes([payload.symbol], cache_only=False)
+        quote = quote_map.get(payload.symbol)
+        resolved_name = (
+            payload.name
+            or (quote.name if quote else "")
+            or (existing.name if existing else "")
+            or payload.symbol
+        )
+        market = MarketSnapshot(
+            price=float(quote.price) if quote else None,
+            prev_close=float(quote.prev_close) if quote else None,
+            volume=float(quote.volume) if quote else None,
+        )
+        sellable_quantity = None
+        if payload.side == "sell":
+            sellable_quantity = compute_sellable_quantity(
+                int(existing.quantity) if existing else 0,
+                today_buy_quantities.get(payload.symbol, 0),
+            )
+
+        execution = execute_stock_order(
+            account=acc,
+            existing_position=existing,
+            symbol=payload.symbol,
+            name=resolved_name,
+            side=payload.side,
+            quantity=payload.quantity,
+            limit_price=payload.price,
+            market=market,
+            sellable_quantity=sellable_quantity,
+            open_commission_rate=OPEN_COMMISSION_RATE,
+            close_commission_rate=CLOSE_COMMISSION_RATE,
+            close_tax_rate=CLOSE_TAX_RATE,
+            min_commission=MIN_COMMISSION,
+        )
+        if execution.status != ORDER_STATUS_FILLED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=execution.message,
+            )
+
         trade_id = f"trd_{uuid4().hex[:8]}"
+        amount = round(execution.amount, 2)
+        executed_price = round(float(execution.fill_price or payload.price), 4)
+        total_fee = execution.total_fee
+        realized_pnl = execution.realized_pnl if payload.side == "sell" else None
+        reason = "用户在模拟盘中执行手动委托，需复盘本次决策与次日观察点"
 
         if payload.side == "buy":
-            total_cost = amount + commission
-            if float(acc.available_cash) < total_cost:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"可用资金不足：需要 {total_cost:.2f}，当前 {float(acc.available_cash):.2f}",
-                )
-
-            acc.available_cash = round(float(acc.available_cash) - total_cost, 2)
-            acc.daily_pnl = round(float(acc.daily_pnl) - commission, 2)
-
-            existing = await pos_repo.get_by_account_symbol(acc.id, payload.symbol)
-            unit_cost = total_cost / payload.quantity
-            if existing:
-                new_qty = existing.quantity + payload.quantity
-                new_cost = ((float(existing.cost_price) * existing.quantity) + total_cost) / new_qty
-                existing.quantity = new_qty
-                existing.cost_price = round(new_cost, 4)
-                existing.current_price = payload.price
-                existing.pnl = round((payload.price - new_cost) * new_qty, 2)
-            else:
+            if existing is None and execution.created_position:
                 session.add(
                     PositionModel(
                         id=f"pos_{uuid4().hex[:8]}",
                         account_id=acc.id,
                         symbol=payload.symbol,
-                        name=payload.name or payload.symbol,
-                        quantity=payload.quantity,
-                        cost_price=round(unit_cost, 4),
-                        current_price=payload.price,
-                        pnl=round((payload.price - unit_cost) * payload.quantity, 2),
+                        name=resolved_name,
+                        quantity=int(execution.created_position["quantity"]),
+                        cost_price=float(execution.created_position["cost_price"]),
+                        current_price=float(execution.created_position["current_price"]),
+                        pnl=float(execution.created_position["pnl"]),
                     )
                 )
-            message = f"买入成功：{payload.symbol} {payload.quantity}股 @ {payload.price}"
-        else:
-            existing = await pos_repo.get_by_account_symbol(acc.id, payload.symbol)
-            available_qty = existing.quantity if existing else 0
-            if available_qty < payload.quantity:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"持仓不足：可卖 {available_qty} 股",
-                )
-
-            net_amount = amount - commission
-            realized_pnl = round(net_amount - float(existing.cost_price) * payload.quantity, 2)
-            acc.available_cash = round(float(acc.available_cash) + net_amount, 2)
-            acc.daily_pnl = round(float(acc.daily_pnl) + realized_pnl, 2)
-
-            new_qty = existing.quantity - payload.quantity
-            if new_qty == 0:
-                await session.delete(existing)
+                cost_price = float(execution.created_position["cost_price"])
             else:
-                existing.quantity = new_qty
-                existing.current_price = payload.price
-                existing.pnl = round((payload.price - float(existing.cost_price)) * new_qty, 2)
-            message = f"卖出成功：{payload.symbol} {payload.quantity}股 @ {payload.price}"
+                cost_price = float(existing.cost_price) if existing else None
+        else:
+            cost_price = cost_price_before
+            if execution.remove_position and existing is not None:
+                await session.delete(existing)
+
+        realized_pnl_pct = (
+            round(realized_pnl / (cost_price_before * payload.quantity), 4)
+            if payload.side == "sell"
+            and realized_pnl is not None
+            and cost_price_before
+            and payload.quantity > 0
+            else None
+        )
 
         session.add(
             RecordModel(
                 id=trade_id,
                 account_id=acc.id,
                 symbol=payload.symbol,
-                name=payload.name or payload.symbol,
+                name=resolved_name,
                 side=payload.side,
-                quantity=payload.quantity,
-                price=payload.price,
-                commission=commission,
+                quantity=execution.filled_quantity,
+                price=executed_price,
+                commission=total_fee,
             )
         )
         session.add(
@@ -806,13 +986,39 @@ class TradingService:
                 content="",
             )
         )
+        await session.flush()
 
         await self._refresh_account_snapshot(session, acc)
+        positions = await pos_repo.list_by_account(acc.id)
+        await self._append_trade_reflection_log(
+            session,
+            account_id=acc.id,
+            researcher=researcher,
+            trade_context={
+                "mode": "manual_order",
+                "side": payload.side,
+                "symbol": payload.symbol,
+                "name": resolved_name,
+                "price": executed_price,
+                "quantity": execution.filled_quantity,
+                "amount": amount,
+                "commission": total_fee,
+                "reason": reason,
+                "cost_price": cost_price,
+                "realized_pnl": realized_pnl,
+                "realized_pnl_pct": realized_pnl_pct,
+                "position_ratio": round(amount / DEFAULT_INITIAL_CAPITAL, 4) if DEFAULT_INITIAL_CAPITAL > 0 else 0.0,
+                "total_asset": float(acc.total_asset),
+                "available_cash": float(acc.available_cash),
+                "holding_names": [position.name for position in positions],
+            },
+        )
         await session.commit()
         self._cache_invalidate(
             [
                 f"account:{user_id}:{payload.researcher_id}",
                 f"positions:{acc.id}",
+                f"replay:{acc.id}",
                 f"stats:{acc.id}",
             ]
         )
@@ -822,7 +1028,13 @@ class TradingService:
             symbol=payload.symbol,
             side=payload.side,
             quantity=payload.quantity,
-            price=payload.price,
+            filled_quantity=execution.filled_quantity,
+            price=executed_price,
             amount=amount,
-            message=message,
+            commission=execution.commission,
+            tax=execution.tax,
+            realized_pnl=realized_pnl,
+            status=execution.status,
+            engine=execution.engine,
+            message=execution.message,
         )

@@ -10,10 +10,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY server /app/server
+COPY server/requirements.txt /app/server/requirements.txt
 
 RUN pip install --upgrade pip \
-    && pip install -e /app/server
+    && pip install -r /app/server/requirements.txt
+
+COPY server /app/server
 
 EXPOSE 8000
 

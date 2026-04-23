@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, status
 
 from app.modules.webhooks.schemas import (
     WebhookCreateRequest,
@@ -16,13 +16,14 @@ service = WebhookService()
 
 @router.get("")
 async def list_endpoints() -> ApiResponse[ListResponse[WebhookEndpoint]]:
-    items = service.list_endpoints()
+    items: list[WebhookEndpoint] = []
     return ApiResponse(data=ListResponse(items=items, total=len(items)))
 
 
 @router.post("")
 async def create_endpoint(payload: WebhookCreateRequest) -> ApiResponse[WebhookEndpoint]:
-    return ApiResponse(data=service.create_endpoint(payload))
+    del payload
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Webhook 接口暂未接入真实数据源")
 
 
 @router.patch("/{webhook_id}/toggle")
@@ -30,9 +31,11 @@ async def toggle_endpoint(
     webhook_id: str,
     payload: WebhookToggleRequest,
 ) -> ApiResponse[WebhookEndpoint]:
-    return ApiResponse(data=service.toggle_endpoint(webhook_id, payload))
+    del webhook_id, payload
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Webhook 接口暂未接入真实数据源")
 
 
 @router.delete("/{webhook_id}")
 async def delete_endpoint(webhook_id: str) -> ApiResponse[WebhookEndpoint]:
-    return ApiResponse(data=service.delete_endpoint(webhook_id))
+    del webhook_id
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Webhook 接口暂未接入真实数据源")

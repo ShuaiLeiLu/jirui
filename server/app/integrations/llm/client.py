@@ -60,7 +60,7 @@ class LLMClient:
     """OpenAI 兼容的 LLM 聊天客户端
 
     支持一次性返回和 SSE 流式输出两种模式。
-    当 base_url 或 api_key 未配置时，自动降级返回 mock 回复。
+    当 base_url 或 api_key 未配置时，直接报错，由上层决定如何处理错误。
     """
 
     def __init__(self, config: LLMConfig | None = None) -> None:
@@ -112,12 +112,10 @@ class LLMClient:
         max_tokens: int | None = None,
     ) -> str:
         """发送聊天请求，返回完整回复文本
-
-        未配置 LLM 时返回 mock 回复。
         """
         if not self.is_configured:
-            logger.warning("LLM 未配置（base_url 或 api_key 为空），返回 mock 回复")
-            return self._mock_reply(messages)
+            logger.warning("LLM 未配置（base_url 或 api_key 为空）")
+            raise RuntimeError("LLM 服务未配置")
 
         client = await self._get_client()
         payload = self._build_payload(
@@ -146,15 +144,10 @@ class LLMClient:
         max_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         """发送聊天请求，以 SSE 流式逐 token 返回
-
-        未配置 LLM 时逐字 yield mock 回复。
         """
         if not self.is_configured:
-            logger.warning("LLM 未配置，返回 mock 流式回复")
-            mock_text = self._mock_reply(messages)
-            for char in mock_text:
-                yield char
-            return
+            logger.warning("LLM 未配置")
+            raise RuntimeError("LLM 服务未配置")
 
         client = await self._get_client()
         payload = self._build_payload(
@@ -193,22 +186,6 @@ class LLMClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
             self._client = None
-
-    # ── Mock 降级 ──
-
-    @staticmethod
-    def _mock_reply(messages: list[LLMMessage]) -> str:
-        """LLM 未配置时的 mock 回复"""
-        last_user_msg = ""
-        for m in reversed(messages):
-            if m.role == "user":
-                last_user_msg = m.content
-                break
-        return (
-            f"[Mock 回复] 已收到你的问题：{last_user_msg[:50]}。"
-            "当前 LLM 未配置，请在 .env 中设置 OPENAI_BASE_URL、OPENAI_API_KEY 和 OPENAI_MODEL。"
-        )
-
 
 # ── 全局单例 ──
 

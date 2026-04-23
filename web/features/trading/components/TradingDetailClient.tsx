@@ -27,11 +27,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import {
-  useTradingAccountWhenEnabled,
-  useTradingLogs,
-  useTradingPositionsWhenEnabled,
+  useTradingAll,
   useTradingRealtimeStream,
-  useTradingRecords,
   useTradingStatsWhenEnabled,
 } from '@/features/trading/hooks';
 import { routes } from '@/lib/constants/routes';
@@ -74,12 +71,14 @@ function fmtMoney(v: number) {
 /** 持仓列表侧边栏 */
 function PositionSidebar({
   positions,
+  records,
   activeSymbol,
   onSelect,
   tab,
   onTabChange,
 }: {
   positions: PositionItem[];
+  records: TradeRecord[];
   activeSymbol: string | null;
   onSelect: (symbol: string) => void;
   tab: 'current' | 'history';
@@ -115,7 +114,30 @@ function PositionSidebar({
 
       {/* 持仓列表 */}
       <div className="flex-1 overflow-y-auto">
-        {positions.length === 0 ? (
+        {tab === 'history' ? (
+          records.length === 0 ? (
+            <div className="py-8 text-center text-xs text-slate-400">暂无最近交易</div>
+          ) : (
+            records.slice(0, 12).map((record) => (
+              <div key={record.trade_id} className="px-3 py-3 border-b border-slate-50">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-medium text-slate-700">{record.name || record.symbol}</div>
+                    <div className="text-xs text-slate-400">
+                      {dayjs(record.created_at).format('MM-DD HH:mm')} · {record.quantity}股
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className={`text-sm font-bold ${record.side === 'buy' ? 'text-rose-500' : 'text-emerald-600'}`}>
+                      {record.side === 'buy' ? '买入' : '卖出'}
+                    </div>
+                    <div className="text-xs text-slate-400">{record.price.toFixed(2)} 元</div>
+                  </div>
+                </div>
+              </div>
+            ))
+          )
+        ) : positions.length === 0 ? (
           <div className="py-8 text-center text-xs text-slate-400">暂无持仓</div>
         ) : (
           positions.map((p) => {
@@ -215,7 +237,9 @@ function TradeLogTradeBlock({ log }: { log: TradeLogItem }) {
                   <td className={`py-2.5 px-4 text-right ${pnlColor(pnlVal)}`}>{pnlPctStr}</td>
                 )}
                 {!isSell && (
-                  <td className="py-2.5 px-4 text-right text-slate-600">10%</td>
+                  <td className="py-2.5 px-4 text-right text-slate-600">
+                    {r.position_ratio !== null && r.position_ratio !== undefined ? fmtPct(r.position_ratio) : '-'}
+                  </td>
                 )}
                 <td className="py-2.5 px-4 text-center">
                   <Tag color={r.side === 'buy' ? 'red' : 'green'} className="!text-xs">
@@ -639,18 +663,14 @@ export function TradingDetailClient({ researcherId }: { researcherId: string }) 
   const [activeSymbol, setActiveSymbol] = useState<string | null>(null); // 选中的持仓
 
   const realtime = useTradingRealtimeStream(researcherId);
-  const enableRestSnapshot = realtime.status !== 'live';
-  const accountQuery = useTradingAccountWhenEnabled(researcherId, enableRestSnapshot);
-  const positionsQuery = useTradingPositionsWhenEnabled(researcherId, enableRestSnapshot);
-  const recordsQuery = useTradingRecords(researcherId);
-  const logsQuery = useTradingLogs(researcherId);
+  const allQuery = useTradingAll(researcherId);
   const statsQuery = useTradingStatsWhenEnabled(researcherId, mainTab === 'history');
 
-  const loading = accountQuery.isLoading || positionsQuery.isLoading || recordsQuery.isLoading || logsQuery.isLoading;
-  const acct = accountQuery.data;
-  const positions = positionsQuery.data ?? [];
-  const records = recordsQuery.data ?? [];
-  const logs = logsQuery.data ?? [];
+  const loading = allQuery.isLoading;
+  const acct = allQuery.data?.account;
+  const positions = allQuery.data?.positions ?? [];
+  const records = allQuery.data?.records ?? [];
+  const logs = allQuery.data?.logs ?? [];
   const stats = statsQuery.data ?? null;
 
   /** 初始资金（以后端返回为准，缺失时兜底 100 万） */
@@ -727,6 +747,7 @@ export function TradingDetailClient({ researcherId }: { researcherId: string }) 
             {/* 持仓列表 */}
             <PositionSidebar
               positions={positions}
+              records={records}
               activeSymbol={activeSymbol}
               onSelect={setActiveSymbol}
               tab={sideTab}

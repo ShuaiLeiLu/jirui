@@ -3,8 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.document import Document as DocumentModel
 from app.modules.documents.schemas import DocumentDetail, DocumentSummary, DocumentType
+from app.repositories.researcher_repo import ResearcherRepository
 
 
 class DocumentService:
@@ -84,3 +88,91 @@ class DocumentService:
             reverse=True,
         )[:limit]
         return [DocumentSummary(**item.model_dump(include=set(DocumentSummary.model_fields.keys()))) for item in sorted_items]
+
+    @staticmethod
+    def _map_document_type(raw_type: str) -> DocumentType:
+        mapping = {
+            "report": "market",
+            "analysis": "stock",
+            "strategy": "industry",
+            "note": "topic",
+            "market": "market",
+            "stock": "stock",
+            "industry": "industry",
+            "topic": "topic",
+        }
+        return mapping.get(raw_type, "topic")
+
+    async def async_list_documents(
+        self,
+        session: AsyncSession,
+        *,
+        doc_type: DocumentType | None = None,
+        limit: int | None = None,
+        page: int | None = None,
+        page_size: int | None = None,
+    ) -> tuple[list[DocumentSummary], int]:
+        stmt = select(DocumentModel).order_by(DocumentModel.created_at.desc())
+        result = await session.execute(stmt)
+        documents = list(result.scalars().all())
+
+        if doc_type:
+            documents = [
+                item for item in documents
+                if self._map_document_type(item.doc_type) == doc_type
+            ]
+
+        total = len(documents)
+        if limit is not None:
+            documents = documents[:limit]
+        elif page is not None or page_size is not None:
+            effective_page = page or 1
+            effective_page_size = page_size or 20
+            start = (effective_page - 1) * effective_page_size
+            end = start + effective_page_size
+            documents = documents[start:end]
+
+        repo = ResearcherRepository(session)
+        researcher_names: dict[str, str] = {}
+        items: list[DocumentSummary] = []
+        for doc in documents:
+            if doc.researcher_id not in researcher_names:
+                researcher = await repo.get_by_id(doc.researcher_id)
+                researcher_names[doc.researcher_id] = researcher.name if researcher else "未知"
+            items.append(DocumentSummary(
+                document_id=doc.id,
+                title=doc.title,
+                researcher_name=researcher_names[doc.researcher_id],
+                document_type=self._map_document_type(doc.doc_type),
+                symbol=None,
+                view_count=doc.view_count,
+                like_count=0,
+                created_at=doc.created_at,
+            ))
+        return items, total
+
+    async def async_hot_documents(self, session: AsyncSession, *, limit: int = 5) -> list[DocumentSummary]:
+        items, _ = await self.async_list_documents(session, limit=limit)
+        return sorted(items, key=lambda item: (item.view_count, item.like_count), reverse=True)[:limit]
+
+    async def async_get_document(self, session: AsyncSession, document_id: str) -> DocumentDetail:
+        stmt = select(DocumentModel).where(DocumentModel.id == document_id)
+        result = await session.execute(stmt)
+        doc = result.scalar_one_or_none()
+        if not doc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在")
+
+        repo = ResearcherRepository(session)
+        researcher = await repo.get_by_id(doc.researcher_id)
+        return DocumentDetail(
+            document_id=doc.id,
+            title=doc.title,
+            researcher_name=researcher.name if researcher else "未知",
+            document_type=self._map_document_type(doc.doc_type),
+            symbol=None,
+            view_count=doc.view_count,
+            like_count=0,
+            created_at=doc.created_at,
+            content_markdown=doc.content,
+            tags=[],
+        )

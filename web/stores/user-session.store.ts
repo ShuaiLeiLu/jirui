@@ -37,7 +37,7 @@ export const useUserSessionStore = create<UserSessionState>((set) => ({
   login: (token, user) => {
     localStorage.setItem('access_token', token);
     localStorage.setItem('user_profile', JSON.stringify(user));
-    set({ accessToken: token, user });
+    set({ accessToken: token, user, hydrated: true });
   },
 
   setUser: (user) => {
@@ -48,7 +48,7 @@ export const useUserSessionStore = create<UserSessionState>((set) => ({
   logout: () => {
     localStorage.removeItem('access_token');
     localStorage.removeItem('user_profile');
-    set({ accessToken: null, user: null });
+    set({ accessToken: null, user: null, hydrated: true });
   },
 
   hydrate: () => {

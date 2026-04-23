@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_optional_session
 from app.modules.documents.schemas import DocumentDetail, DocumentSummary, DocumentType
 from app.modules.documents.service import DocumentService
 from app.schemas.common import ApiResponse, ListResponse
@@ -16,8 +18,12 @@ async def list_documents(
     limit: int | None = Query(default=None, ge=1),
     page: int | None = Query(default=None, ge=1),
     page_size: int | None = Query(default=None, ge=1, le=100),
+    session: AsyncSession | None = Depends(get_optional_session),
 ) -> ApiResponse[ListResponse[DocumentSummary]]:
-    items, total = service.list_documents(
+    if not session:
+        return ApiResponse(data=ListResponse(items=[], total=0))
+    items, total = await service.async_list_documents(
+        session,
         doc_type=doc_type,
         limit=limit,
         page=page,
@@ -27,11 +33,21 @@ async def list_documents(
 
 
 @router.get("/hot")
-async def hot_documents(limit: int = 5) -> ApiResponse[ListResponse[DocumentSummary]]:
-    items = service.hot_documents(limit=limit)
+async def hot_documents(
+    limit: int = 5,
+    session: AsyncSession | None = Depends(get_optional_session),
+) -> ApiResponse[ListResponse[DocumentSummary]]:
+    if not session:
+        return ApiResponse(data=ListResponse(items=[], total=0))
+    items = await service.async_hot_documents(session, limit=limit)
     return ApiResponse(data=ListResponse(items=items, total=len(items)))
 
 
 @router.get("/{document_id}")
-async def get_document(document_id: str) -> ApiResponse[DocumentDetail]:
-    return ApiResponse(data=service.get_document(document_id))
+async def get_document(
+    document_id: str,
+    session: AsyncSession | None = Depends(get_optional_session),
+) -> ApiResponse[DocumentDetail]:
+    if not session:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="数据库不可用")
+    return ApiResponse(data=await service.async_get_document(session, document_id))

@@ -30,7 +30,7 @@ class AppContainer:
                 from sqlalchemy import text
                 await session.execute(text("SELECT 1"))
         except Exception:
-            pass  # 数据库不可用时静默，由 get_optional_session 处理降级
+            pass  # 数据库不可用时静默，由 get_optional_session 统一处理
 
     async def shutdown(self) -> None:
         await self.database.shutdown()

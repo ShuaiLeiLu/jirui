@@ -36,6 +36,7 @@ class PositionItem(SchemaModel):
     symbol: str              # 股票代码
     name: str                # 股票名称
     quantity: int            # 持有数量
+    sellable_quantity: int | None = None  # T+1 可卖数量
     cost_price: float        # 成本价
     current_price: float     # 当前价
     pnl: float               # 持仓盈亏
@@ -55,6 +56,7 @@ class TradeRecord(SchemaModel):
     realized_pnl: float | None = None
     realized_pnl_pct: float | None = None
     hold_days: float | None = None
+    position_ratio: float | None = None
     created_at: datetime
 
 
@@ -110,6 +112,14 @@ class TradingStats(SchemaModel):
     risk: RiskMetrics                  # 风控指标
 
 
+class TradingAllData(SchemaModel):
+    """模拟盘聚合数据 —— 一次请求返回全部页面所需内容。"""
+    account: TradingAccount
+    positions: list[PositionItem]
+    records: list[TradeRecord]
+    logs: list[TradeLogItem]
+
+
 class TradingStreamSnapshot(SchemaModel):
     """交易实时快照（SSE 推送）。"""
     generated_at: datetime
@@ -133,6 +143,12 @@ class PlaceOrderResponse(SchemaModel):
     symbol: str
     side: TradeSide
     quantity: int
+    filled_quantity: int
     price: float
     amount: float            # 成交金额
+    commission: float = 0.0
+    tax: float = 0.0
+    realized_pnl: float | None = None
+    status: str = "FILLED"
+    engine: str = ""
     message: str             # 执行结果描述

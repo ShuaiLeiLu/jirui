@@ -47,7 +47,7 @@ async def feed(
 
 @router.get("/ai-panels")
 async def ai_panels() -> ApiResponse[ListResponse[NewsAiPanel]]:
-    """AI 智能分析面板 —— 调用 Gemini 生成 AI 解读，失败时自动降级"""
+    """AI 智能分析面板 —— 仅返回真实 LLM 解读结果。"""
     items = await service.generate_ai_panels_with_llm()
     return ApiResponse(data=ListResponse(items=items, total=len(items)))
 

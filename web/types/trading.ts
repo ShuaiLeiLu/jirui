@@ -31,6 +31,7 @@ export interface TradeRecord {
   realized_pnl?: number | null;
   realized_pnl_pct?: number | null;
   hold_days?: number | null;
+  position_ratio?: number | null;
   created_at: string;
 }
 
@@ -78,6 +79,13 @@ export interface TradingStats {
   monthly_returns: MonthlyReturn[];
   daily_returns: DailyReturn[];
   risk: RiskMetrics;
+}
+
+export interface TradingAllData {
+  account: TradingAccount;
+  positions: PositionItem[];
+  records: TradeRecord[];
+  logs: TradeLogItem[];
 }
 
 export interface TradingStreamSnapshot {

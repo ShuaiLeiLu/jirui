@@ -1,9 +1,7 @@
-"""
-社区路由 —— 支持双模式（DB + mock fallback）
-"""
+"""社区路由 —— 仅返回真实数据库数据。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_optional_session
@@ -21,12 +19,8 @@ async def list_posts(
     q: str | None = Query(default=None),
     session: AsyncSession | None = Depends(get_optional_session),
 ) -> ApiResponse[ListResponse[CommunityPost]]:
-    """帖子列表（DB 查空时 fallback 到 mock）"""
-    items = []
-    if session:
-        items = await service.async_list_posts(session, q=q)
-    if not items:
-        items = service.list_posts(q=q)
+    """帖子列表。"""
+    items = await service.async_list_posts(session, q=q) if session else []
     return ApiResponse(data=ListResponse(items=items, total=len(items)))
 
 
@@ -36,10 +30,9 @@ async def get_post(
     session: AsyncSession | None = Depends(get_optional_session),
 ) -> ApiResponse[CommunityPostDetail]:
     """帖子详情"""
-    if session:
-        data = await service.async_get_post(session, post_id)
-    else:
-        data = service.get_post(post_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="数据库不可用")
+    data = await service.async_get_post(session, post_id)
     return ApiResponse(data=data)
 
 
@@ -50,8 +43,7 @@ async def create_post(
     session: AsyncSession | None = Depends(get_optional_session),
 ) -> ApiResponse[CommunityPostDetail]:
     """创建帖子"""
-    if session:
-        data = await service.async_create_post(session, user_id, payload)
-    else:
-        data = service.create_post(payload)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="数据库不可用")
+    data = await service.async_create_post(session, user_id, payload)
     return ApiResponse(data=data)
