@@ -12,6 +12,7 @@ FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 
 ENV NODE_ENV=production \
+    INTERNAL_API_BASE_URL=http://api:8000/api/v1 \
     NEXT_PUBLIC_API_BASE_URL=/api/v1 \
     NEXT_PUBLIC_SSE_BASE_URL=/api/v1
 
