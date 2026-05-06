@@ -14,6 +14,7 @@ import logging
 from datetime import datetime as dt
 from datetime import time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -33,6 +34,11 @@ _TRADING_END = time(15, 0)
 
 _scheduler: AsyncIOScheduler | None = None
 _database: DatabaseFactory | None = None
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _now_shanghai() -> dt:
+    return dt.now(tz=_SHANGHAI_TZ)
 
 
 def _task_job_id(task_id: str) -> str:
@@ -41,8 +47,7 @@ def _task_job_id(task_id: str) -> str:
 
 def _is_trading_hours() -> bool:
     """判断当前是否在A股交易时段（工作日 09:15 ~ 15:00）"""
-    from zoneinfo import ZoneInfo
-    now = dt.now(tz=ZoneInfo("Asia/Shanghai"))
+    now = _now_shanghai()
     # 周一=0 ~ 周五=4，周末不交易
     if now.weekday() > 4:
         return False
@@ -329,7 +334,7 @@ def start_scheduler(db: DatabaseFactory, redis: RedisFactory | None = None) -> A
     if redis is not None:
         _scheduler.add_job(
             _refresh_trading_quotes,
-            trigger=IntervalTrigger(seconds=15),
+            trigger=IntervalTrigger(seconds=60, timezone="Asia/Shanghai"),
             args=[db, redis],
             id="refresh_trading_quotes",
             name="刷新模拟盘行情缓存",
@@ -340,7 +345,7 @@ def start_scheduler(db: DatabaseFactory, redis: RedisFactory | None = None) -> A
         _scheduler.add_job(
             _refresh_trading_quotes,
             trigger="date",
-            run_date=dt.now() + timedelta(seconds=3),
+            run_date=_now_shanghai() + timedelta(seconds=10),
             args=[db, redis],
             id="initial_trading_quote_refresh",
             name="启动后首次刷新模拟盘行情缓存",
@@ -353,7 +358,7 @@ def start_scheduler(db: DatabaseFactory, redis: RedisFactory | None = None) -> A
         for index, group in enumerate(PREOPEN_REFRESH_GROUPS.values()):
             _scheduler.add_job(
                 refresh_preopen_group,
-                trigger=IntervalTrigger(seconds=group.interval_seconds),
+                trigger=IntervalTrigger(seconds=group.interval_seconds, timezone="Asia/Shanghai"),
                 args=[redis, group.name],
                 id=f"refresh_preopen_snapshot_{group.name}",
                 name=f"刷新盘前快照：{group.name}",
@@ -364,7 +369,7 @@ def start_scheduler(db: DatabaseFactory, redis: RedisFactory | None = None) -> A
             _scheduler.add_job(
                 refresh_preopen_group,
                 trigger="date",
-                run_date=dt.now() + timedelta(seconds=5 + index),
+                run_date=_now_shanghai() + timedelta(seconds=15 + index * 5),
                 args=[redis, group.name],
                 id=f"initial_preopen_snapshot_{group.name}",
                 name=f"启动后首次刷新盘前快照：{group.name}",
@@ -377,7 +382,7 @@ def start_scheduler(db: DatabaseFactory, redis: RedisFactory | None = None) -> A
         _scheduler.add_job(
             _run_daily_rotation,
             trigger="date",
-            run_date=dt.now() + timedelta(seconds=5),
+            run_date=_now_shanghai() + timedelta(seconds=5),
             args=[db],
             id="initial_rotation",
             name="启动后首次调仓",
@@ -390,7 +395,7 @@ def start_scheduler(db: DatabaseFactory, redis: RedisFactory | None = None) -> A
     _scheduler.add_job(
         load_active_orchestration_tasks,
         trigger="date",
-        run_date=dt.now() + timedelta(seconds=1),
+        run_date=_now_shanghai() + timedelta(seconds=1),
         args=[db],
         id="load_active_orchestration_tasks",
         name="加载任务编排 ACTIVE 任务",

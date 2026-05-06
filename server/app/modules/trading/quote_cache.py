@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
@@ -64,7 +65,7 @@ async def refresh_cached_quotes(redis: Redis, symbols: list[str]) -> dict[str, S
     if not normalized_symbols:
         return {}
 
-    quotes = await run_sync(get_stock_quote_by_symbols, normalized_symbols)
+    quotes = await asyncio.wait_for(run_sync(get_stock_quote_by_symbols, normalized_symbols), timeout=45)
     await set_cached_quotes(redis, quotes)
     logger.info("[行情缓存] 刷新 %d/%d 只股票", len(quotes), len(normalized_symbols))
     return quotes

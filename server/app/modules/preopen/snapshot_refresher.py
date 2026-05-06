@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime as dt
@@ -51,7 +52,7 @@ def is_a_share_trading_hours() -> bool:
 
 async def _run_service_method(service: PreopenService, method_name: str, *args: Any) -> Any:
     method = getattr(service, method_name)
-    return await run_sync(method, *args)
+    return await asyncio.wait_for(run_sync(method, *args), timeout=45)
 
 
 def _has_min_items(data: Any, min_items: int) -> bool:
@@ -106,7 +107,7 @@ async def refresh_all_preopen_groups(redis_factory: RedisFactory) -> None:
 PREOPEN_REFRESH_GROUPS: dict[str, RefreshGroup] = {
     "realtime": RefreshGroup(
         name="realtime",
-        interval_seconds=15,
+        interval_seconds=60,
         trading_hours_only=True,
         targets=(
             RefreshTarget(
@@ -146,7 +147,7 @@ PREOPEN_REFRESH_GROUPS: dict[str, RefreshGroup] = {
     ),
     "limit_pool": RefreshGroup(
         name="limit_pool",
-        interval_seconds=30,
+        interval_seconds=120,
         trading_hours_only=True,
         targets=(
             RefreshTarget(
