@@ -2,6 +2,7 @@
 .DS_Store
 .idea/
 .vscode/
+.codex-tasks/
 
 # Node / Next.js
 node_modules/

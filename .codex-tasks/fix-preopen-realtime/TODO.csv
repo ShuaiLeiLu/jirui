@@ -1,5 +1,0 @@
-id,task,status,acceptance_criteria,validation_command,completed_at,retry_count,notes
-1,Add regression tests for live preopen fallback,DONE,Tests fail before implementation and cover cache miss live fetch,python -m pytest server/tests/test_preopen_snapshots.py -q,2026-05-25T14:40:00+08:00,0,Red verified with 2 expected failures
-2,Fix backend snapshot fallback and expose ladder trade date,DONE,Preopen endpoints use cached data when present and live data when missing,python -m pytest server/tests/test_preopen_snapshots.py -q,2026-05-25T14:45:00+08:00,0,Also covers Shanghai timezone trade-date selection
-3,Remove frontend hardcoded ladder dates and enable refresh,DONE,Ladder modal uses API trade date and no static sample pools,npm --prefix web run typecheck,2026-05-25T14:45:00+08:00,0,pnpm unavailable in environment; npm typecheck passed
-4,Run final verification,DONE,Backend tests and frontend typecheck pass,python -m pytest server/tests/test_preopen_snapshots.py -q && npm --prefix web run typecheck,2026-05-25T14:48:00+08:00,0,Verified with separate commands because PowerShell command chaining syntax differs
