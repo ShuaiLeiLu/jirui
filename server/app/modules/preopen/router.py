@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import db_session_dependency, get_optional_session
 from app.core.container import get_container
+from app.integrations.openclaw.digest_push import discard_digest_pushes, flush_digest_pushes
 from app.modules.preopen.schemas import (
     AiDigest,
     AnomalyOverview,
@@ -209,7 +210,12 @@ async def ai_digest_v2(
 ) -> ApiResponse[dict]:
     """盘前 AI 解读 v2 —— 非流式版本(供测试 / 调度任务调用)。"""
     data = await run_preopen_chain(session)
-    await session.commit()
+    try:
+        await session.commit()
+    except Exception:
+        discard_digest_pushes(session)
+        raise
+    await flush_digest_pushes(session)
     return ApiResponse(data=data)
 
 

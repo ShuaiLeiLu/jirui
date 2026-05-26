@@ -16,6 +16,7 @@ from app.modules.preopen.router import _load_list_or_live
 from app.modules.preopen.snapshot_cache import load_snapshot, save_snapshot
 from app.modules.preopen.snapshot_refresher import RefreshTarget, _refresh_target
 from app.integrations.akshare import client as akshare_client
+from app.skills.base import SkillContext, SkillResult
 
 
 class FakeRedis:
@@ -56,12 +57,17 @@ class _FakeSession:
     def __init__(self, value: object | None) -> None:
         self.value = value
         self.flushed = False
+        self.info: dict[str, object] = {}
+        self.added: list[object] = []
 
     async def execute(self, _stmt: object) -> _ScalarResult:
         return _ScalarResult(self.value)
 
     async def flush(self) -> None:
         self.flushed = True
+
+    def add(self, item: object) -> None:
+        self.added.append(item)
 
 
 def _hot_news_item(title: str) -> HotNewsItem:
@@ -365,14 +371,60 @@ async def test_run_preopen_chain_reuses_existing_digest_without_running_chain(
 
     monkeypatch.setattr(preopen_skill_service, "_build_orchestrator", fail_build_orchestrator)
 
+    session = _FakeSession(stored)
     data = await preopen_skill_service.run_preopen_chain(
-        _FakeSession(stored),  # type: ignore[arg-type]
+        session,  # type: ignore[arg-type]
         trade_date=date(2026, 5, 25),
     )
 
     assert data["digest_id"] == "digest_existing"
     assert data["main_thesis_md"] == "已生成的盘前报告"
     assert data["reused"] is True
+    assert "openclaw_digest_pushes" not in session.info
+
+
+@pytest.mark.asyncio
+async def test_run_preopen_chain_queues_digest_push_for_new_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeOrchestrator:
+        async def run(self, ctx: SkillContext) -> dict[str, SkillResult]:
+            return {
+                "main_thesis": SkillResult(
+                    skill_name="main_thesis",
+                    success=True,
+                    narrative="## 一、今日核心矛盾\n半导体扩散确认。",
+                    structured={
+                        "bias": "bullish",
+                        "falsification_signals": ["半导体龙头炸板"],
+                    },
+                    duration_ms=1,
+                )
+            }
+
+    async def fake_persist_thesis_logs(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr(
+        preopen_skill_service, "_build_orchestrator", lambda: FakeOrchestrator()
+    )
+    monkeypatch.setattr(
+        preopen_skill_service,
+        "_persist_thesis_logs_for_active_researchers",
+        fake_persist_thesis_logs,
+    )
+
+    session = _FakeSession(None)
+    data = await preopen_skill_service.run_preopen_chain(
+        session,  # type: ignore[arg-type]
+        trade_date=date(2026, 5, 26),
+    )
+
+    assert data["reused"] is False
+    messages = session.info["openclaw_digest_pushes"]
+    assert len(messages) == 1
+    assert "【极睿智投｜盘前摘要】" in messages[0]
+    assert "半导体扩散确认" in messages[0]
 
 
 @pytest.mark.asyncio

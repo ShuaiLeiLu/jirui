@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from types import SimpleNamespace
 
 import pytest
 
 from app.models.trading import DailyReviewReport
 from app.modules.trading import skill_service as trading_skill_service
+from app.skills.base import SkillContext, SkillResult
 
 
 class _ScalarResult:
@@ -21,12 +21,17 @@ class _FakeSession:
     def __init__(self, value: object | None) -> None:
         self.value = value
         self.flushed = False
+        self.info: dict[str, object] = {}
+        self.added: list[object] = []
 
     async def execute(self, _stmt: object) -> _ScalarResult:
         return _ScalarResult(self.value)
 
     async def flush(self) -> None:
         self.flushed = True
+
+    def add(self, item: object) -> None:
+        self.added.append(item)
 
 
 def _report() -> DailyReviewReport:
@@ -84,8 +89,9 @@ async def test_run_daily_review_reuses_existing_report_without_running_chain(
     monkeypatch.setattr(trading_skill_service, "_resolve_account_and_researcher", fake_resolve)
     monkeypatch.setattr(trading_skill_service, "_build_orchestrator", fail_build_orchestrator)
 
+    session = _FakeSession(_report())
     data = await trading_skill_service.run_daily_review(
-        _FakeSession(_report()),  # type: ignore[arg-type]
+        session,  # type: ignore[arg-type]
         researcher_id="r1",
         trade_date=date(2026, 5, 25),
     )
@@ -93,6 +99,61 @@ async def test_run_daily_review_reuses_existing_report_without_running_chain(
     assert data["report_id"] == "review_20260525_r1"
     assert data["reused"] is True
     assert data["coach_report_md"] == "## 一、今日总结\n小胜，但追高问题仍在。"
+    assert "openclaw_digest_pushes" not in session.info
+
+
+@pytest.mark.asyncio
+async def test_run_daily_review_queues_push_for_new_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeOrchestrator:
+        async def run(self, ctx: SkillContext) -> dict[str, SkillResult]:
+            return {
+                "pnl_attribution": SkillResult(
+                    skill_name="pnl_attribution",
+                    success=True,
+                    structured={"win_rate": 0.6, "total_pnl": 3200.0},
+                ),
+                "alpha_analysis": SkillResult(
+                    skill_name="alpha_analysis",
+                    success=True,
+                    structured={"alpha_vs_index": 1.2, "alpha_vs_sector": 0.4},
+                ),
+                "daily_coach": SkillResult(
+                    skill_name="daily_coach",
+                    success=True,
+                    narrative="## 今日总结\n执行纪律改善。",
+                ),
+            }
+
+    async def fake_resolve(*_args: object, **_kwargs: object) -> tuple[str, str]:
+        return "acct1", "策略研究员"
+
+    async def fake_embed(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        trading_skill_service, "_resolve_account_and_researcher", fake_resolve
+    )
+    monkeypatch.setattr(
+        trading_skill_service, "_build_orchestrator", lambda: FakeOrchestrator()
+    )
+    monkeypatch.setattr(trading_skill_service, "_safe_embed", fake_embed)
+
+    session = _FakeSession(None)
+    data = await trading_skill_service.run_daily_review(
+        session,  # type: ignore[arg-type]
+        researcher_id="r1",
+        trade_date=date(2026, 5, 26),
+    )
+
+    assert data["reused"] is False
+    assert data["researcher_name"] == "策略研究员"
+    messages = session.info["openclaw_digest_pushes"]
+    assert len(messages) == 1
+    assert "【极睿智投｜盘后复盘摘要】" in messages[0]
+    assert "研究员：策略研究员" in messages[0]
+    assert "执行纪律改善" in messages[0]
 
 
 @pytest.mark.asyncio

@@ -17,9 +17,10 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.integrations.openclaw.digest_push import flush_digest_pushes, queue_preopen_digest_summary
 from app.models.preopen import PreopenAiDigest
 from app.models.researcher import Researcher, ResearcherThesisLog
-from app.skills.base import SkillContext, SkillEvent, SkillEventType
+from app.skills.base import SkillContext, SkillEvent
 from app.skills.orchestrator import SkillOrchestrator
 from app.skills.registry import get_skill_registry
 from app.skills.shared.run_log import write_skill_run_logs
@@ -85,7 +86,9 @@ async def run_preopen_chain(
     await write_skill_run_logs(
         session, chain_kind="preopen", trade_date=ctx.trade_date, outputs=outputs,
     )
-    return _digest_to_result(digest, reused=False)
+    result = _digest_to_result(digest, reused=False)
+    queue_preopen_digest_summary(session, result)
+    return result
 
 
 async def get_existing_preopen_digest(
@@ -149,7 +152,10 @@ async def stream_preopen_chain(
             session, chain_kind="preopen", trade_date=ctx.trade_date,
             outputs=ctx.outputs,
         )
+        result = _digest_to_result(digest, reused=False)
+        queue_preopen_digest_summary(session, result)
         await session.commit()
+        await flush_digest_pushes(session)
         yield _format_sse_event(
             "persisted",
             {
@@ -173,7 +179,11 @@ async def _persist_digest(
     main_thesis_md = main_result.narrative if main_result and main_result.success else ""
     structured = main_result.structured if main_result and main_result.success else {}
     bias = str(structured.get("bias", "")) if isinstance(structured, dict) else ""
-    falsification = structured.get("falsification_signals", []) if isinstance(structured, dict) else []
+    falsification = (
+        structured.get("falsification_signals", [])
+        if isinstance(structured, dict)
+        else []
+    )
 
     skill_outputs_serial = {
         name: {
@@ -210,7 +220,9 @@ async def _persist_digest(
         digest.generated_at = now
         digest.main_thesis_md = main_thesis_md
         digest.skill_outputs = skill_outputs_serial
-        digest.falsification_signals = list(falsification) if isinstance(falsification, list) else []
+        digest.falsification_signals = (
+            list(falsification) if isinstance(falsification, list) else []
+        )
         digest.bias = bias
         digest.tokens_used = tokens_used
     await session.flush()
@@ -235,7 +247,11 @@ async def _persist_thesis_logs_for_active_researchers(
     main_struct = (
         digest.skill_outputs.get("main_thesis", {}) if digest.skill_outputs else {}
     ).get("structured", {})
-    key_drivers = main_struct.get("intraday_checkpoints", []) if isinstance(main_struct, dict) else []
+    key_drivers = (
+        main_struct.get("intraday_checkpoints", [])
+        if isinstance(main_struct, dict)
+        else []
+    )
 
     for rid in researcher_ids:
         # 同日同 researcher 已存在则跳过(由 trade_date + researcher_id 唯一确定)

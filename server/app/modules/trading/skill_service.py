@@ -17,6 +17,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.integrations.openclaw.digest_push import flush_digest_pushes, queue_daily_review_summary
 from app.models.researcher import Researcher
 from app.models.trading import DailyReviewReport, TradingAccount
 from app.skills.base import SkillContext, SkillEvent
@@ -84,7 +85,9 @@ async def run_daily_review(
         trade_date=ctx.trade_date, outputs=outputs,
         researcher_id=ctx.researcher_id,
     )
-    return _report_to_result(report, reused=False)
+    result = _report_to_result(report, reused=False, researcher_name=researcher_name)
+    queue_daily_review_summary(session, result)
+    return result
 
 
 async def get_existing_daily_review_report(
@@ -102,8 +105,10 @@ async def get_existing_daily_review_report(
     return result.scalar_one_or_none()
 
 
-def _report_to_result(report: DailyReviewReport, *, reused: bool) -> dict:
-    return {
+def _report_to_result(
+    report: DailyReviewReport, *, reused: bool, researcher_name: str | None = None,
+) -> dict:
+    data = {
         "report_id": report.id,
         "trade_date": report.trade_date.isoformat(),
         "researcher_id": report.researcher_id,
@@ -115,6 +120,9 @@ def _report_to_result(report: DailyReviewReport, *, reused: bool) -> dict:
         "generated_at": report.generated_at,
         "reused": reused,
     }
+    if researcher_name:
+        data["researcher_name"] = researcher_name
+    return data
 
 
 async def stream_daily_review(
@@ -171,7 +179,10 @@ async def stream_daily_review(
             trade_date=ctx.trade_date, outputs=ctx.outputs,
             researcher_id=ctx.researcher_id,
         )
+        result = _report_to_result(report, reused=False, researcher_name=researcher_name)
+        queue_daily_review_summary(session, result)
         await session.commit()
+        await flush_digest_pushes(session)
         yield _format_sse_event(
             "persisted",
             {
@@ -211,7 +222,6 @@ async def _persist_report(
     """落库或更新当日 DailyReviewReport。"""
     coach = outputs.get("daily_coach")
     coach_md = coach.narrative if coach and coach.success else ""
-    coach_structured = coach.structured if coach and coach.success else {}
 
     alpha = outputs.get("alpha_analysis")
     alpha_struct = alpha.structured if alpha and alpha.success else {}

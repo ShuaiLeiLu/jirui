@@ -67,9 +67,9 @@ async def _run_daily_rotation(db: DatabaseFactory) -> None:
     logger.info("[调度器] 开始执行每日轮动调仓...")
     try:
         async with db.session_factory() as session:
-            result = await asyncio.wait_for(
-                execute_daily_rotation(session),
-                timeout=_STRATEGY_JOB_TIMEOUT_SECONDS,
+            result = await execute_daily_rotation(
+                session,
+                per_researcher_timeout=_STRATEGY_JOB_TIMEOUT_SECONDS,
             )
         logger.info("[调度器] 调仓完成: %s", result)
     except TimeoutError:
@@ -89,9 +89,9 @@ async def _run_intraday_confirmation(db: DatabaseFactory) -> None:
     logger.info("[调度器] 开始执行盘中承接确认...")
     try:
         async with db.session_factory() as session:
-            result = await asyncio.wait_for(
-                execute_intraday_confirmation(session),
-                timeout=_STRATEGY_JOB_TIMEOUT_SECONDS,
+            result = await execute_intraday_confirmation(
+                session,
+                per_researcher_timeout=_STRATEGY_JOB_TIMEOUT_SECONDS,
             )
         logger.info("[调度器] 盘中确认完成: %s", result)
     except TimeoutError:
@@ -161,13 +161,19 @@ async def _reset_daily_pnl(db: DatabaseFactory) -> None:
 
 async def _run_preopen_ai_digest(db: DatabaseFactory) -> None:
     """每日 08:30 自动生成盘前 ai-digest-v2,落库供前端读取。"""
+    from app.integrations.openclaw.digest_push import discard_digest_pushes, flush_digest_pushes
     from app.modules.preopen.skill_service import run_preopen_chain
 
     logger.info("[调度器] 开始生成盘前 AI digest...")
     try:
         async with db.session_factory() as session:
             result = await run_preopen_chain(session)
-            await session.commit()
+            try:
+                await session.commit()
+            except Exception:
+                discard_digest_pushes(session)
+                raise
+            await flush_digest_pushes(session)
         logger.info(
             "[调度器] 盘前 digest 完成,bias=%s",
             result.get("bias", "-"),
@@ -180,6 +186,7 @@ async def _run_daily_review_all(db: DatabaseFactory) -> None:
     """每日 16:00 对所有 active researcher 跑教练复盘。"""
     from sqlalchemy import select
 
+    from app.integrations.openclaw.digest_push import discard_digest_pushes, flush_digest_pushes
     from app.models.researcher import Researcher
     from app.modules.trading.skill_service import run_daily_review
 
@@ -200,7 +207,12 @@ async def _run_daily_review_all(db: DatabaseFactory) -> None:
                     logger.exception(
                         "[调度器] 研究员 %s 复盘失败", rid,
                     )
-            await session.commit()
+            try:
+                await session.commit()
+            except Exception:
+                discard_digest_pushes(session)
+                raise
+            await flush_digest_pushes(session)
             logger.info(
                 "[调度器] 当日复盘完成,共 %d/%d 个研究员",
                 done, len(researcher_ids),
