@@ -82,6 +82,28 @@ def test_build_daily_review_message_contains_researcher_metrics() -> None:
     assert "明天降低追涨仓位" in message
 
 
+def test_build_daily_review_message_uses_readable_sections() -> None:
+    message = build_daily_review_message(_review_result())
+
+    assert "\n\n【核心指标】\n" in message
+    assert "\n\n【复盘摘要】\n" in message
+    assert "\n\n【行动建议】\n" in message
+    assert "- 明天降低追涨仓位" in message
+    assert "- 优先检查止损纪律" in message
+    assert message.count("\n\n") >= 4
+
+
+def test_build_preopen_digest_message_uses_readable_sections() -> None:
+    message = build_preopen_digest_message(_digest_result())
+
+    assert "\n\n【基本信息】\n" in message
+    assert "\n\n【盘前摘要】\n" in message
+    assert "\n\n【观察清单】\n" in message
+    assert "- 观察中芯国际承接" in message
+    assert "- 不追高炸板票" in message
+    assert message.count("\n\n") >= 4
+
+
 @pytest.mark.asyncio
 async def test_push_preopen_digest_summary_skips_reused_digest() -> None:
     requests: list[httpx.Request] = []

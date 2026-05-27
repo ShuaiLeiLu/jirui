@@ -14,14 +14,21 @@ def build_preopen_digest_message(result: dict[str, Any]) -> str:
     trade_date = str(result.get("trade_date") or "")
     bias = str(result.get("bias") or "unknown")
     digest_id = str(result.get("digest_id") or "")
-    summary = _markdown_summary(str(result.get("main_thesis_md") or ""))
+    summary, checklist = _format_markdown_digest(str(result.get("main_thesis_md") or ""))
     return (
         "【极睿智投｜盘前摘要】\n"
-        f"日期：{trade_date}\n"
-        f"方向：{bias}\n"
-        "摘要：\n"
+        "\n"
+        "【基本信息】\n"
+        f"- 日期：{trade_date}\n"
+        f"- 方向：{bias}\n"
+        f"- 编号：{digest_id}\n"
+        "\n"
+        "【盘前摘要】\n"
         f"{summary or '盘前摘要已生成，请打开极睿智投查看完整内容。'}\n"
-        f"编号：{digest_id}\n"
+        "\n"
+        "【观察清单】\n"
+        f"{checklist or '- 请打开极睿智投查看完整盘前观察清单。'}\n"
+        "\n"
         "提示：以上为 AI 盘前投研摘要，不构成投资建议。"
     )
 
@@ -31,21 +38,28 @@ def build_daily_review_message(result: dict[str, Any]) -> str:
     researcher_name = str(
         result.get("researcher_name") or result.get("researcher_id") or "未命名研究员"
     )
-    summary = _markdown_summary(str(result.get("coach_report_md") or ""))
+    summary, actions = _format_markdown_digest(str(result.get("coach_report_md") or ""))
     alpha_index = _format_pct(result.get("alpha_vs_index"))
     alpha_sector = _format_pct(result.get("alpha_vs_sector"))
     win_rate = _format_win_rate(result.get("win_rate"))
     total_pnl = _format_money(result.get("total_pnl"))
     return (
         "【极睿智投｜盘后复盘摘要】\n"
-        f"研究员：{researcher_name}\n"
-        f"日期：{trade_date}\n"
-        f"相对指数：{alpha_index}\n"
-        f"相对板块：{alpha_sector}\n"
-        f"胜率：{win_rate}\n"
-        f"当日盈亏：{total_pnl} 元\n"
-        "摘要：\n"
+        "\n"
+        "【核心指标】\n"
+        f"- 研究员：{researcher_name}\n"
+        f"- 日期：{trade_date}\n"
+        f"- 相对指数：{alpha_index}\n"
+        f"- 相对板块：{alpha_sector}\n"
+        f"- 胜率：{win_rate}\n"
+        f"- 当日盈亏：{total_pnl} 元\n"
+        "\n"
+        "【复盘摘要】\n"
         f"{summary or '盘后复盘已生成，请打开极睿智投查看完整内容。'}\n"
+        "\n"
+        "【行动建议】\n"
+        f"{actions or '- 请打开极睿智投查看完整盘后行动建议。'}\n"
+        "\n"
         "提示：以上为模拟盘盘后复盘信息，不构成投资建议。"
     )
 
@@ -134,24 +148,54 @@ def _queue_message(session: Any, message: str) -> bool:
     return True
 
 
-def _markdown_summary(markdown: str, *, max_chars: int = 1200) -> str:
-    lines: list[str] = []
+def _format_markdown_digest(markdown: str, *, max_chars: int = 1200) -> tuple[str, str]:
+    paragraphs: list[str] = []
+    bullets: list[str] = []
+    current_heading = ""
     for raw_line in markdown.splitlines():
         line = raw_line.strip()
         if not line:
             continue
         if line.startswith("#"):
-            text = re.sub(r"^#+\s*", "", line).strip()
-        else:
-            text = re.sub(r"^[>*_\-`#\s]+", "", line).strip()
-        text = re.sub(r"[*_`]+", "", text)
-        text = re.sub(r"\s+", " ", text)
+            current_heading = _clean_markdown_text(re.sub(r"^#+\s*", "", line))
+            continue
+
+        bullet_match = re.match(r"^(?:[-*+]\s+|\d+[.)、]\s+)(.+)$", line)
+        if bullet_match:
+            text = _clean_markdown_text(bullet_match.group(1))
+            if text:
+                bullets.append(f"- {text}")
+            continue
+
+        text = _clean_markdown_text(re.sub(r"^[>\s]+", "", line))
         if text:
-            lines.append(text)
-        joined = "\n".join(lines)
-        if len(joined) >= max_chars:
-            return joined[:max_chars].rstrip() + "..."
-    return "\n".join(lines)
+            paragraphs.append(f"{current_heading}：{text}" if current_heading else text)
+
+    summary = _truncate_lines(paragraphs, max_chars=max_chars)
+    checklist = _truncate_lines(bullets, max_chars=max_chars // 2)
+    return summary, checklist
+
+
+def _clean_markdown_text(text: str) -> str:
+    text = re.sub(r"[*_`]+", "", text).strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def _truncate_lines(lines: list[str], *, max_chars: int) -> str:
+    selected: list[str] = []
+    total = 0
+    for line in lines:
+        next_total = total + len(line) + (1 if selected else 0)
+        if next_total > max_chars:
+            break
+        selected.append(line)
+        total = next_total
+    joined = "\n".join(selected)
+    if not joined and lines:
+        return lines[0][:max_chars].rstrip() + "..."
+    if len(selected) < len(lines):
+        return joined.rstrip() + "\n..."
+    return joined
 
 
 def _format_pct(value: object) -> str:
